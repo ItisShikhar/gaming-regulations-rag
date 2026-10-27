@@ -1,0 +1,4 @@
+{"id":"compliance-1","type":"exact","question":"What does N.J.A.C. 13:69O-1.2(e)(1) require about where mobile gaming can take place?","gold":[{"jurisdiction":"nj_dge","section_id":"13:69O-1.2","clause_path":["(e)","1."]}]}
+{"id":"compliance-2","type":"exact","question":"What does UKGC RTS requirement 7A say about random number generation and game results?","gold":[{"jurisdiction":"ukgc","section_id":"RTS 7A"}]}
+{"id":"compliance-3","type":"exact","question":"What does GLI-19 section 3.2.1 require the independent test laboratory to review?","gold":[{"jurisdiction":"gli","section_id":"3.2.1"}]}
+{"id":"compliance-4","type":"paraphrase","question":"Compare the UKGC and GLI-19 requirements for testing whether online game outcomes are fair and random.","gold":[{"jurisdiction":"ukgc","section_id":"RTS 7A"},{"jurisdiction":"gli","section_id":"3.2"}]}
