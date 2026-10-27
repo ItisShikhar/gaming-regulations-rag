@@ -43,10 +43,20 @@ def unique_sections(chunks, k):
 
 
 def first_hit_rank(results, golds):
-    for rank, chunk in enumerate(results, start=1):
-        if any(is_hit(chunk, gold) for gold in golds):
-            return rank
-    return None
+    gold_ranks = []
+    for gold in golds:
+        rank = next(
+            (
+                rank
+                for rank, chunk in enumerate(results, start=1)
+                if is_hit(chunk, gold)
+            ),
+            None,
+        )
+        if rank is None:
+            return None
+        gold_ranks.append(rank)
+    return max(gold_ranks) if gold_ranks else None
 
 
 def check_gold_labels(questions, chunks):
