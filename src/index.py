@@ -3,6 +3,8 @@ import json
 import os
 import pickle
 import re
+import shutil
+import uuid
 from pathlib import Path
 
 from qdrant_client import QdrantClient
@@ -18,16 +20,87 @@ COLLECTION = "compliance"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 MODEL_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 EMBED_WITH_HEADING = True
-TOKENIZER_VERSION = 3
-INDEX_TEXT_VERSION = 1
+TOKENIZER_VERSION = 4
+INDEX_TEXT_VERSION = 2
+BM25_TEXT_VERSION = 3
 MAX_INPUT_TOKENS = 220
+INDIA_STATES = (
+    "andhra_pradesh",
+    "arunachal_pradesh",
+    "assam",
+    "bihar",
+    "chhattisgarh",
+    "goa",
+    "gujarat",
+    "haryana",
+    "himachal_pradesh",
+    "jharkhand",
+    "karnataka",
+    "kerala",
+    "madhya_pradesh",
+    "maharashtra",
+    "manipur",
+    "meghalaya",
+    "mizoram",
+    "nagaland",
+    "odisha",
+    "punjab",
+    "rajasthan",
+    "sikkim",
+    "tamil_nadu",
+    "telangana",
+    "tripura",
+    "uttar_pradesh",
+    "uttarakhand",
+    "west_bengal",
+)
+INDIA_UNION_TERRITORIES = (
+    "andaman_and_nicobar_islands",
+    "chandigarh",
+    "dadra_and_nagar_haveli_and_daman_and_diu",
+    "delhi",
+    "jammu_and_kashmir",
+    "ladakh",
+    "lakshadweep",
+    "puducherry",
+)
+INDIA_JURISDICTIONS = (
+    "india_central",
+    *(f"india_state_{state}" for state in INDIA_STATES),
+    *(f"india_ut_{territory}" for territory in INDIA_UNION_TERRITORIES),
+)
+INDIA_JURISDICTION_TYPES = {
+    "india_central": "central",
+    **{f"india_state_{state}": "state" for state in INDIA_STATES},
+    **{
+        f"india_ut_{territory}": "union_territory"
+        for territory in INDIA_UNION_TERRITORIES
+    },
+}
+INDIA_JURISDICTION_NAMES = {
+    "india_central": "India (Central)",
+    **{
+        f"india_state_{slug}": slug.replace("_", " ").title()
+        for slug in INDIA_STATES
+    },
+    **{
+        f"india_ut_{slug}": slug.replace("_", " ").title()
+        for slug in INDIA_UNION_TERRITORIES
+    },
+}
 SECTION_REFERENCE = re.compile(
     r"(?<![A-Z0-9])(?:13:69[ODE]-\d+\.\d+[A-Z]?(?:\([A-Z0-9]+\))*|"
     r"RTS\s*(?:(?:requirement|aim)\s+)?\d+[A-Z]?|GLI-?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
-SECTION_NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+){1,4}(?![\w.])")
+SECTION_NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+){0,4}(?![\w.])")
 WORD = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+TOKEN_ALIASES = {
+    "define": "definition",
+    "defines": "definition",
+    "defined": "definition",
+    "definitions": "definition",
+}
 CLAUSE_MARKER = re.compile(
     r"^\s*(\([A-Za-z0-9]+\)|\d{1,2}\.|[ivxlcdm]{1,6}\.)\s*$",
     re.IGNORECASE,
@@ -44,7 +117,10 @@ def tokenize(text):
     identifiers.extend(
         match.group(0) for match in SECTION_NUMBER.finditer(normalized)
     )
-    words = [token.lower() for token in WORD.findall(normalized)]
+    words = [
+        TOKEN_ALIASES.get(token.lower(), token.lower())
+        for token in WORD.findall(normalized)
+    ]
     return words + identifiers
 
 
@@ -72,11 +148,45 @@ def index_text(chunk):
     parts = []
     if EMBED_WITH_HEADING:
         parts.extend(chunk.get("heading_path", []))
-    for key in ("jurisdiction", "regulation_type", "section_id"):
+    for key in (
+        "country",
+        "jurisdiction_name",
+        "jurisdiction_type",
+        "jurisdiction",
+        "regulation_type",
+        "section_id",
+    ):
         if chunk.get(key):
             parts.append(str(chunk[key]))
     parts.append(chunk["text"])
     return "\n".join(parts)
+
+
+def bm25_text(chunk):
+    parts = []
+    if chunk.get("section_id"):
+        parts.append(str(chunk["section_id"]))
+    heading_path = chunk.get("heading_path", [])
+    if heading_path and heading_path[-1] != chunk.get("title"):
+        parts.append(heading_path[-1])
+    text = chunk["text"]
+    title = chunk.get("title")
+    if title:
+        text = re.sub(re.escape(title), " ", text, flags=re.IGNORECASE)
+    parts.append(text)
+    return "\n".join(parts)
+
+
+def bm25_texts(chunks):
+    sectioned_files = {
+        chunk["file"] for chunk in chunks if chunk.get("section_id")
+    }
+    return [
+        bm25_text(chunk)
+        if chunk.get("section_id") or chunk["file"] not in sectioned_files
+        else ""
+        for chunk in chunks
+    ]
 
 
 def _token_count(tokenizer, chunk, text):
@@ -84,6 +194,7 @@ def _token_count(tokenizer, chunk, text):
         index_text({**chunk, "text": text}),
         add_special_tokens=True,
         truncation=False,
+        verbose=False,
     )
     return len(encoding["input_ids"])
 
@@ -238,7 +349,26 @@ def split_chunks_for_token_limit(chunks, tokenizer, max_tokens):
     return indexed_chunks
 
 
+def remove_orphaned_compliance_collections():
+    qdrant_root = Path(QDRANT_PATH)
+    meta_path = qdrant_root / "meta.json"
+    collection_root = qdrant_root / "collection"
+    if not meta_path.exists() or not collection_root.exists():
+        return
+
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    registered_collections = set(metadata.get("collections", {}))
+    for collection_path in collection_root.iterdir():
+        if (
+            collection_path.is_dir()
+            and collection_path.name.startswith(COLLECTION)
+            and collection_path.name not in registered_collections
+        ):
+            shutil.rmtree(collection_path)
+
+
 def build_index():
+    remove_orphaned_compliance_collections()
     chunks = load_source_chunks()
     if not chunks:
         raise ValueError(f"No chunks found in {CHUNKS_FILE}")
@@ -280,11 +410,7 @@ def build_index():
     if embedding_size is None:
         raise ValueError("Could not determine the model's embedding dimension")
 
-    points = [
-        PointStruct(id=i, vector=vectors[i].tolist(), payload=chunks[i])
-        for i in range(len(chunks))
-    ]
-    bm25 = BM25Okapi([tokenize(t) for t in texts])
+    bm25 = BM25Okapi([tokenize(text) for text in bm25_texts(chunks)])
     BM25_FILE.parent.mkdir(parents=True, exist_ok=True)
     temp_chunks_file = INDEX_CHUNKS_FILE.with_suffix(".jsonl.tmp")
     temp_bm25_file = BM25_FILE.with_suffix(".pkl.tmp")
@@ -301,15 +427,19 @@ def build_index():
                 "bm25": bm25,
                 "chunk_ids": chunk_ids,
                 "corpus_fingerprint": fingerprint,
+                "bm25_text_version": BM25_TEXT_VERSION,
                 "index_text_version": INDEX_TEXT_VERSION,
                 "tokenizer_version": TOKENIZER_VERSION,
             }, output_file)
             output_file.flush()
             os.fsync(output_file.fileno())
 
+        # A new name prevents stale points from a same-name local Qdrant rebuild.
+        collection_name = f"{COLLECTION}_{fingerprint[:12]}_{uuid.uuid4().hex[:8]}"
         manifest = {
-            "collection": COLLECTION,
+            "collection": collection_name,
             "corpus_fingerprint": fingerprint,
+            "bm25_text_version": BM25_TEXT_VERSION,
             "embedding_model": MODEL_NAME,
             "embedding_revision": MODEL_REVISION,
             "index_text_version": INDEX_TEXT_VERSION,
@@ -324,29 +454,47 @@ def build_index():
             os.fsync(output_file.fileno())
 
         client = QdrantClient(path=QDRANT_PATH)
+        stale_collection_names = []
         try:
-            if client.collection_exists(COLLECTION):
-                client.delete_collection(COLLECTION)
             client.create_collection(
-                COLLECTION,
+                collection_name,
                 vectors_config=VectorParams(
                     size=embedding_size, distance=Distance.COSINE
                 ),
             )
+            points = [
+                PointStruct(id=i, vector=vectors[i].tolist(), payload=chunks[i])
+                for i in range(len(chunks))
+            ]
             for start in range(0, len(points), 256):
-                client.upsert(COLLECTION, points=points[start:start + 256])
+                client.upsert(
+                    collection_name,
+                    points=points[start:start + 256],
+                )
 
-            point_count = client.count(COLLECTION).count
+            point_count = client.count(collection_name, exact=True).count
             if point_count != len(chunks):
                 raise RuntimeError(
                     f"Indexed {point_count} points, expected {len(chunks)}."
                 )
             print("qdrant points:", point_count)
+
+            os.replace(temp_chunks_file, INDEX_CHUNKS_FILE)
+            os.replace(temp_bm25_file, BM25_FILE)
+            os.replace(temp_manifest_file, INDEX_MANIFEST_FILE)
+
+            stale_collection_names = [
+                collection.name
+                for collection in client.get_collections().collections
+                if collection.name.startswith(f"{COLLECTION}_")
+                and collection.name != collection_name
+            ]
+            if client.collection_exists(COLLECTION):
+                stale_collection_names.append(COLLECTION)
+            for stale_collection in stale_collection_names:
+                client.delete_collection(stale_collection)
         finally:
             client.close()
-        os.replace(temp_chunks_file, INDEX_CHUNKS_FILE)
-        os.replace(temp_bm25_file, BM25_FILE)
-        os.replace(temp_manifest_file, INDEX_MANIFEST_FILE)
     finally:
         if temp_chunks_file.exists():
             temp_chunks_file.unlink()

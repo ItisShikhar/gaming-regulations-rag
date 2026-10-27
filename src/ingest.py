@@ -14,6 +14,10 @@ NJ_SECTION = re.compile(r"^\s*(13:69[ODE]-\d+\.\d+[A-Z]?)\s*$", re.IGNORECASE)
 GLI_CHAPTER = re.compile(r"^\s*Chapter\s+(\d+)\s*:\s*(.*?)\s*$", re.IGNORECASE)
 GLI_SECTION = re.compile(r"^\s*(\d+(?:\.\d+)+)(?:\s+(.*?))?\s*$")
 CLAUSE_MARKER = re.compile(r"^\s*(\([A-Za-z0-9]+\)|\d{1,2}\.|[ivxlcdm]{1,6}\.)\s*$", re.IGNORECASE)
+CLAUSE_PREFIX = re.compile(
+    r"^\s*(\([A-Za-z0-9]+\)|\d{1,2}\.|[ivxlcdm]{1,6}\.)\s+(.+)$",
+    re.IGNORECASE,
+)
 NJ_SUBCHAPTER = re.compile(r"^\s*SUBCHAPTER\s+\d+\.\s+.*$", re.IGNORECASE)
 PAGE_FOOTER = re.compile(r"^\s*-\s*\d+\s*-\s*$")
 IDENTIFIER = re.compile(
@@ -64,6 +68,12 @@ def _paragraph_blocks(lines, page_by_line, start, end):
             continue
 
         marker = CLAUSE_MARKER.match(line)
+        clause_text = ""
+        if marker is None:
+            clause_prefix = CLAUSE_PREFIX.match(line)
+            if clause_prefix:
+                marker = clause_prefix
+                clause_text = clause_prefix.group(2)
         if marker and current_lines:
             flush()
         if marker:
@@ -75,6 +85,8 @@ def _paragraph_blocks(lines, page_by_line, start, end):
             else:
                 level = 3
             clause_stack = clause_stack[:level - 1] + [label]
+            if clause_text:
+                line = clause_text
 
         if not line.strip():
             if current_lines:
@@ -198,7 +210,14 @@ def _format_clause_paths(clause_paths):
     )
 
 
-def _build_compliance_chunks(path, relative_path, jurisdiction, regulation_type, source_url):
+def _build_compliance_chunks(
+    path,
+    relative_path,
+    jurisdiction,
+    regulation_type,
+    source_url,
+    source_metadata=None,
+):
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     page_by_line = []
@@ -234,7 +253,11 @@ def _build_compliance_chunks(path, relative_path, jurisdiction, regulation_type,
             section_label = section["section_id"] or "section"
             chunk_id = f"{relative_path}#{section_index}-{section_label}-{index}"
             heading_path = section["heading_path"]
-            citation = section["section_id"] or " > ".join(heading_path)
+            if jurisdiction.startswith("india_") and section["section_id"]:
+                title = (source_metadata or {}).get("title", path.stem)
+                citation = f"{title}, section {section['section_id']}"
+            else:
+                citation = section["section_id"] or " > ".join(heading_path)
             if jurisdiction == "gli" and section["section_id"]:
                 citation = f"GLI-19 {citation}"
             if clause_paths:
@@ -264,6 +287,27 @@ def _build_compliance_chunks(path, relative_path, jurisdiction, regulation_type,
                 "oversize": len(body) > COMPLIANCE_MAX_CHARS,
                 "continuation": any(block.get("continuation", False) for block in blocks),
             })
+            if source_metadata:
+                for key in (
+                    "jurisdiction_name",
+                    "jurisdiction_type",
+                    "country",
+                    "source_system",
+                    "title",
+                    "handle",
+                    "act_id",
+                    "act_year",
+                    "enactment_date",
+                    "repealed_status",
+                    "document_status",
+                    "legal_effect_status",
+                    "commencement_status",
+                    "commencement_date",
+                    "commencement_notification_reference",
+                    "published_date",
+                ):
+                    if key in source_metadata:
+                        chunks[-1][key] = source_metadata[key]
     return chunks
 
 
@@ -376,16 +420,24 @@ def _parse_markdown_sections(lines, page_by_line):
             for item in reversed(current_path):
                 match = re.search(
                     r"\bRTS\s+(?:(?:requirement|aim)\s+)?(\d+[A-Z]?)\b|"
-                    r"\b13:69[ODE]-\d+\.\d+[A-Z]?\b",
+                    r"\b13:69[ODE]-\d+\.\d+[A-Z]?\b|"
+                    r"\bSection\s+(\d+[A-Z]?)\b",
                     item,
                     re.IGNORECASE,
                 )
                 if match:
                     section_id = (
                         f"RTS {match.group(1)}"
-                        if match.group(1)
+                        if match.group(1) and "RTS" in match.group(0).upper()
                         else match.group(0).strip()
                     )
+                    section_match = re.search(
+                        r"\bSection\s+(\d+[A-Z]?)\b",
+                        match.group(0),
+                        re.IGNORECASE,
+                    )
+                    if section_match:
+                        section_id = section_match.group(1)
                     break
             sections.append({
                 "heading_path": list(current_path),
@@ -438,19 +490,41 @@ def ingest_compliance():
     for path in source_paths:
         if path.name.startswith("_"):
             continue
-        jurisdiction = path.relative_to(COMPLIANCE_RAW_DIR).parts[0]
-        if jurisdiction not in source_urls:
-            raise ValueError(f"Unknown compliance jurisdiction: {jurisdiction}")
-        regulation_type = "administrative_code" if jurisdiction == "nj_dge" else "technical_standard"
         relative_path = path.relative_to(COMPLIANCE_RAW_DIR).as_posix()
-        if jurisdiction == "ukgc":
+        source_metadata = None
+        top_level = path.relative_to(COMPLIANCE_RAW_DIR).parts[0]
+        if top_level == "india":
+            metadata_path = path.with_suffix(".source.json")
+            if not metadata_path.exists():
+                raise FileNotFoundError(
+                    f"IndiaCode metadata file is missing for {path}"
+                )
+            source_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            jurisdiction = source_metadata["jurisdiction"]
+            regulation_type = source_metadata["regulation_type"]
+            source_url = source_metadata["source_url"]
+        else:
+            jurisdiction = top_level
+            if jurisdiction not in source_urls:
+                raise ValueError(f"Unknown compliance jurisdiction: {jurisdiction}")
+            regulation_type = (
+                "administrative_code"
+                if jurisdiction == "nj_dge"
+                else "technical_standard"
+            )
+        if top_level == "ukgc":
             source_url = source_urls[jurisdiction][0] + path.stem
-        elif jurisdiction == "gli":
+        elif top_level == "gli":
             source_url = source_urls[jurisdiction][1]
-        elif jurisdiction == "nj_dge":
+        elif top_level == "nj_dge":
             source_url = source_urls[jurisdiction][0]
         file_chunks = _build_compliance_chunks(
-            path, relative_path, jurisdiction, regulation_type, source_url
+            path,
+            relative_path,
+            jurisdiction,
+            regulation_type,
+            source_url,
+            source_metadata,
         )
         if not file_chunks:
             raise ValueError(f"No chunks were created from {path}")

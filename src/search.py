@@ -8,10 +8,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from index import (
+    BM25_TEXT_VERSION,
     BM25_FILE,
     COLLECTION,
     INDEX_TEXT_VERSION,
     INDEX_MANIFEST_FILE,
+    INDIA_JURISDICTIONS,
+    INDIA_JURISDICTION_NAMES,
+    INDIA_JURISDICTION_TYPES,
     MODEL_NAME,
     MODEL_REVISION,
     QDRANT_PATH,
@@ -23,10 +27,24 @@ from index import (
 
 RRF_K = 60
 DEPTH = 100
-JURISDICTIONS = ("ukgc", "nj_dge", "gli")
-REGULATION_TYPES = ("technical_standard", "administrative_code")
+BASE_JURISDICTIONS = ("ukgc", "nj_dge", "gli")
+JURISDICTIONS = BASE_JURISDICTIONS + INDIA_JURISDICTIONS
+REGULATION_TYPES = (
+    "technical_standard",
+    "administrative_code",
+    "central_act",
+    "central_rule",
+    "central_notification",
+    "central_draft_notice",
+    "state_act",
+    "state_rule",
+    "state_notification",
+    "union_territory_act",
+    "union_territory_rule",
+    "union_territory_notification",
+)
 STATUTE_REFERENCE = re.compile(
-    r"\b(13:69[ODE]-\d+\.\d+[A-Z]?)(\([A-Z0-9]+\))*",
+    r"\b(13:69[ODE]-\d+\.\d+[A-Z]?)(?:\([A-Z0-9]+\))*",
     re.IGNORECASE,
 )
 RTS_REFERENCE = re.compile(
@@ -34,7 +52,7 @@ RTS_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 SECTION_REFERENCE = re.compile(
-    r"\b(?:section|§)\s*(\d+(?:\.\d+)+)\b",
+    r"\b(?:section|§)\s*(\d+(?:\.\d+)*)\b",
     re.IGNORECASE,
 )
 JURISDICTION_ALIASES = {
@@ -44,6 +62,11 @@ JURISDICTION_ALIASES = {
         re.IGNORECASE,
     ),
     "gli": re.compile(r"\bgli(?:\s*-\s*\d+|\s+\d+)\b", re.IGNORECASE),
+}
+INDIA_REGION_ALIASES = {
+    code: re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+    for code, name in INDIA_JURISDICTION_NAMES.items()
+    if code != "india_central"
 }
 
 _MODEL = None
@@ -80,6 +103,10 @@ def _validate_filters(filters):
             allowed = JURISDICTIONS
         elif key == "regulation_type":
             allowed = REGULATION_TYPES
+        elif key == "jurisdiction_type":
+            allowed = tuple(sorted(set(INDIA_JURISDICTION_TYPES.values())))
+        elif key == "country":
+            allowed = ("India",)
         else:
             raise ValueError(f"Unsupported compliance filter: {key}")
         if value not in allowed:
@@ -102,6 +129,15 @@ def _qdrant_filter(filters):
 
 
 def infer_jurisdictions(query):
+    india_regions = [
+        jurisdiction
+        for jurisdiction, pattern in INDIA_REGION_ALIASES.items()
+        if pattern.search(query)
+    ]
+    if india_regions:
+        return india_regions
+    if re.search(r"\bIndia\b|\bIndian\b", query, re.IGNORECASE):
+        return list(INDIA_JURISDICTIONS)
     return [
         jurisdiction
         for jurisdiction, pattern in JURISDICTION_ALIASES.items()
@@ -146,13 +182,24 @@ def _assert_index_current():
             "The compliance index uses a different embedding text format. "
             "Run `python src/index.py` again."
         )
-    point_count = _get_client().count(COLLECTION).count
+    if manifest.get("bm25_text_version") != BM25_TEXT_VERSION:
+        raise ValueError(
+            "The compliance index uses a different BM25 text format. "
+            "Run `python src/index.py` again."
+        )
+    collection_name = manifest.get("collection")
+    if not isinstance(collection_name, str) or not (
+        collection_name == COLLECTION
+        or collection_name.startswith(f"{COLLECTION}_")
+    ):
+        raise ValueError("The compliance index manifest has an invalid collection name.")
+    point_count = _get_client().count(collection_name, exact=True).count
     if point_count != len(chunks) or manifest.get("point_count") != len(chunks):
         raise ValueError(
             f"The compliance index has {point_count} points for {len(chunks)} chunks. "
             "Run `python src/index.py` again."
         )
-    return fingerprint
+    return collection_name
 
 
 @lru_cache(maxsize=1)
@@ -164,6 +211,7 @@ def _load_bm25():
         not isinstance(saved, dict)
         or saved.get("tokenizer_version") != TOKENIZER_VERSION
         or saved.get("index_text_version") != INDEX_TEXT_VERSION
+        or saved.get("bm25_text_version") != BM25_TEXT_VERSION
     ):
         raise ValueError(
             "The compliance BM25 index is stale or incompatible. "
@@ -262,10 +310,10 @@ def _exact_reference_ids(query, chunks, filters):
 
 
 def _dense_ids(query, k, filters=None):
-    _assert_index_current()
+    collection_name = _assert_index_current()
     vector = _get_model().encode(query, normalize_embeddings=True).tolist()
     result = _get_client().query_points(
-        COLLECTION,
+        collection_name,
         query=vector,
         query_filter=_qdrant_filter(filters),
         limit=k,
@@ -379,7 +427,8 @@ def multi_query_search(query, k=5, filters=None, jurisdictions=None):
         if "jurisdiction" in selected_filters:
             jurisdictions = [selected_filters["jurisdiction"]]
         else:
-            jurisdictions = infer_jurisdictions(query) or list(JURISDICTIONS)
+            inferred = infer_jurisdictions(query)
+            jurisdictions = inferred or list(BASE_JURISDICTIONS)
     elif not jurisdictions:
         raise ValueError("Pass at least one jurisdiction to multi-query search.")
 
@@ -426,6 +475,11 @@ def main():
     )
     parser.add_argument("--jurisdiction", choices=JURISDICTIONS)
     parser.add_argument("--regulation-type", choices=REGULATION_TYPES)
+    parser.add_argument(
+        "--jurisdiction-type",
+        choices=tuple(sorted(set(INDIA_JURISDICTION_TYPES.values()))),
+    )
+    parser.add_argument("--country", choices=("India",))
     parser.add_argument("-k", type=int, default=5)
     args = parser.parse_args()
     if args.k < 1:
@@ -436,6 +490,10 @@ def main():
         filters["jurisdiction"] = args.jurisdiction
     if args.regulation_type:
         filters["regulation_type"] = args.regulation_type
+    if args.jurisdiction_type:
+        filters["jurisdiction_type"] = args.jurisdiction_type
+    if args.country:
+        filters["country"] = args.country
 
     if args.mode == "compare":
         results = compare_modes(args.query, args.k, filters)
