@@ -2,7 +2,7 @@
 
 This repository is a learning bench for Python, retrieval-augmented generation, and search evaluation.
 
-It indexes public gaming rules and technical standards from New Jersey, the United Kingdom, and GLI.
+It indexes public gaming laws and technical standards from India, New Jersey, the United Kingdom, and GLI.
 
 It does not generate answers with a language model. It retrieves source chunks and reports their citations.
 
@@ -18,7 +18,7 @@ Each chunk stores its jurisdiction, document type, section, clause path, source 
 
 | Path | Purpose |
 | --- | --- |
-| `src/download_corpus.py` | Download the PDF and UKGC web sources. |
+| `src/download_corpus.py` | Download central and state sources from India Code, NJ DGE PDFs, GLI-19, and UKGC pages. |
 | `src/extract_pdfs.py` | Extract searchable text from the PDF files. |
 | `src/ingest.py` | Create character-bounded chunks with section and clause metadata. |
 | `src/index.py` | Split chunks by model tokens and build the Qdrant and BM25 indexes. |
@@ -27,7 +27,8 @@ Each chunk stores its jurisdiction, document type, section, clause path, source 
 | `eval/run_eval.py` | Measure retrieval quality against the expected sections. |
 | `eval/test_compliance.py` | Test chunk parsing and retrieval behavior. |
 
-The `data/raw`, `data/processed`, `data/qdrant-compliance`, and `results` directories are local. Git ignores them.
+The `data/raw`, `data/processed`, `data/qdrant-compliance`, and `results` directories are local.
+Git ignores them.
 
 ## Requirements
 
@@ -53,13 +54,18 @@ Run these commands from the repository root, in order:
 
 The downloader saves source files under `data/raw/compliance`.
 
+The IndiaCode collector searches its Central, State, and Union Territory communities.
+It saves source files and a coverage report at `data/raw/compliance/india/source_catalog.json`.
+The report lists each community and every source record that the search found.
+
 The PDF extractor writes Markdown beside each PDF file. The ingester writes `data/processed/compliance_chunks.jsonl`.
 
 The indexer creates token-bounded chunks at `data/processed/compliance_index_chunks.jsonl`.
-It creates the `compliance` Qdrant collection under `data/qdrant-compliance`.
+It creates a versioned Qdrant collection under `data/qdrant-compliance`.
 It also writes `data/processed/compliance_bm25.pkl` and an index manifest.
 
-The indexer replaces the local `compliance` collection when it builds a new index.
+The manifest points search to the current Qdrant collection.
+The indexer removes old compliance collections after it verifies the new collection.
 Close any search process before you rebuild the index.
 
 The manifest stores the corpus fingerprint, pinned embedding model revision, tokenizer version, and point count.
@@ -87,7 +93,14 @@ Filter results to one jurisdiction or regulation type:
 ```powershell
 .\.venv\Scripts\python.exe src\search.py "random number generation" --jurisdiction ukgc
 .\.venv\Scripts\python.exe src\search.py "account controls" --regulation-type administrative_code
+.\.venv\Scripts\python.exe src\search.py "online gaming restrictions" --jurisdiction india_state_tamil_nadu
+.\.venv\Scripts\python.exe src\search.py "India online gaming rules" --country India
+.\.venv\Scripts\python.exe src\search.py "online gaming restrictions" --jurisdiction-type state --country India
 ```
+
+The India jurisdiction codes use `india_central`, `india_state_<name>`, and `india_ut_<name>`.
+For example, the code for Andhra Pradesh is `india_state_andhra_pradesh`.
+Use `--jurisdiction` to narrow a query to one state or union territory.
 
 The search modes work as follows:
 
@@ -130,7 +143,7 @@ Run the compliance benchmark:
 
 The evaluation reports Recall@5 and Mean Reciprocal Rank. It checks every expected section against the generated chunks before it scores retrieval.
 
-The current evaluation file has four questions. Its scores are a smoke test, not evidence of production quality.
+The current evaluation file has eight questions. Its scores are a smoke test, not evidence of production quality.
 
 Add questions that test exact citations, paraphrases, cross-jurisdiction comparisons, and questions that the corpus cannot answer. Keep expected section labels tied to source text.
 
@@ -156,13 +169,31 @@ The [official GLI standards page](https://gaminglabs.com/gli-standards/) lists t
 The GLI-19 PDF comes from a third-party GitHub mirror.
 Direct access to GLI's file was blocked during collection.
 
+India law sources come from [India Code](https://indiacode.gov.in/).
+The collector searches all 36 State and Union Territory communities and the Central community.
+It found gaming-related title matches in 27 regional communities.
+It found no title matches in 9 communities.
+Those 9 search results do not prove that the jurisdictions have no applicable laws.
+The communities without title matches are Bihar, Chandigarh, Chhattisgarh, Himachal Pradesh, Jammu and Kashmir, Jharkhand, Ladakh, Lakshadweep, and Uttarakhand.
+The catalog search only uses the terms listed in `source_catalog.json`.
+
+The India corpus includes the central Online Gaming Act of 2025 and state gaming, gambling, lottery, and betting sources.
+The consolidated Act text cites a commencement date of 1 May 2026.
+It also cites notification S.O. 1994 (E), dated 22 April 2026.
+The corpus does not contain that separate notification.
+The MeitY source is a notice about draft Online Gaming Rules, dated 2 October 2025.
+It is not the draft rules themselves.
+This collection does not contain a verified final version of those Rules.
+Review current Gazette and Ministry sources before you rely on the legal status.
+
 The collected files are snapshots.
 The New Jersey PDFs date from 2016 and 2017.
 They can be older than the current rules.
-Check each source and its effective date before you use a result for a compliance decision.
+Review each source and its effective date before you use a result for a compliance decision.
 
 The chunks include a source URL and PDF page numbers.
-They do not include verified effective dates or amendment histories.
+IndiaCode metadata can show that an Act is marked repealed.
+It does not provide verified current effect dates or a full amendment history for every Act.
 
 This project is for learning and research. It is not legal advice and does not determine whether a product complies with a rule.
 
