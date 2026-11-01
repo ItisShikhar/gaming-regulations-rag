@@ -109,7 +109,7 @@ The search modes work as follows:
 - **Hybrid:** combines dense and BM25 ranks with RRF. Exact references receive a promotion when the question names a recognized section.
 - **Pre-filter:** applies metadata filters before each retriever selects its candidates.
 - **Post-filter:** selects global candidates first, then removes chunks outside the filters. This mode can return fewer relevant chunks.
-- **Multi-query:** searches the same question once per selected jurisdiction, then merges the results. It does not rewrite the question.
+- **Multi-query:** searches the same question once per selected jurisdiction, then interleaves ranked results to retain jurisdiction coverage. It does not rewrite the question.
 
 BM25 uses corpus-wide token statistics in both filter modes. A separate BM25 index for each jurisdiction is a possible next experiment.
 
@@ -141,11 +141,17 @@ Run the compliance benchmark:
 .\.venv\Scripts\python.exe eval\run_eval.py
 ```
 
-The evaluation reports Recall@5 and Mean Reciprocal Rank. It checks every expected section against the generated chunks before it scores retrieval.
+The evaluation reports Recall@1, Recall@5, Mean Reciprocal Rank, and Complete@5.
+It checks every expected section against the generated chunks before it scores retrieval.
 
-The current evaluation file has eight questions. Its scores are a smoke test, not evidence of production quality.
+The evaluation file has 48 curated questions.
+It covers exact citations, paraphrases, and cross-jurisdiction comparisons.
+The score is still a benchmark for this corpus, not evidence of production quality.
 
-Add questions that test exact citations, paraphrases, cross-jurisdiction comparisons, and questions that the corpus cannot answer. Keep expected section labels tied to source text.
+Recall@1 and Recall@5 measure the share of expected source sections found in the top results.
+For a comparison question, each expected jurisdiction is one source section.
+Complete@5 measures the share of questions where the search found every expected section.
+MRR uses the rank of the first matching source section.
 
 Run the unit tests:
 

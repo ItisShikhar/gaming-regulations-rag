@@ -35,11 +35,12 @@ from search import (
     _assert_bm25_alignment,
     _matches_filters,
     _exact_reference_ids,
+    _interleave_rankings,
     _rrf,
     _validate_filters,
     infer_jurisdictions,
 )
-from run_eval import first_hit_rank
+from run_eval import first_hit_rank, first_relevant_rank, recall_at_k
 
 
 class ComplianceChunkingTests(unittest.TestCase):
@@ -224,6 +225,21 @@ class ComplianceChunkingTests(unittest.TestCase):
 
 
 class ComplianceRetrievalTests(unittest.TestCase):
+    def test_multi_section_recall_counts_each_expected_source(self):
+        golds = [
+            {"jurisdiction": "ukgc", "section_id": "RTS 7A"},
+            {"jurisdiction": "gli", "section_id": "3.2.2"},
+        ]
+        results = [
+            {"jurisdiction": "ukgc", "section_id": "RTS 7A"},
+            {"jurisdiction": "gli", "section_id": "3.2.2"},
+        ]
+
+        self.assertEqual(recall_at_k(results, golds, 1), 0.5)
+        self.assertEqual(recall_at_k(results, golds, 5), 1.0)
+        self.assertEqual(first_relevant_rank(results, golds), 1)
+        self.assertEqual(first_hit_rank(results, golds), 2)
+
     def test_index_startup_removes_only_unregistered_compliance_stores(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -257,6 +273,24 @@ class ComplianceRetrievalTests(unittest.TestCase):
         self.assertIsNone(first_hit_rank(results, golds))
         results.append({"jurisdiction": "gli", "section_id": "3.2"})
         self.assertEqual(first_hit_rank(results, golds), 2)
+
+    def test_evaluation_matches_section_to_the_requested_act_title(self):
+        from run_eval import is_hit
+
+        wanted = {
+            "jurisdiction": "india_central",
+            "title": "The Promotion and Regulation of Online Gaming Act, 2025",
+            "section_id": "2",
+        }
+        same_section_wrong_act = {
+            "jurisdiction": "india_central",
+            "title": "The Prize Competitions Act, 1955",
+            "section_id": "2",
+        }
+        correct_act = {**wanted}
+
+        self.assertFalse(is_hit(same_section_wrong_act, wanted))
+        self.assertTrue(is_hit(correct_act, wanted))
 
     def test_tokenizer_preserves_statutory_and_standard_identifiers(self):
         tokens = tokenize(
@@ -339,18 +373,22 @@ class ComplianceRetrievalTests(unittest.TestCase):
             _validate_filters({"jurisdiction": "other"})
         with self.assertRaises(ValueError):
             _validate_filters({"file": "anything"})
+        with self.assertRaises(ValueError):
+            _validate_filters({"title": ""})
         self.assertEqual(
             _validate_filters({
                 "jurisdiction": "india_state_andhra_pradesh",
                 "jurisdiction_type": "state",
                 "regulation_type": "state_act",
                 "country": "India",
+                "title": "The Andhra Pradesh Gaming Act, 1974.",
             }),
             {
                 "jurisdiction": "india_state_andhra_pradesh",
                 "jurisdiction_type": "state",
                 "regulation_type": "state_act",
                 "country": "India",
+                "title": "The Andhra Pradesh Gaming Act, 1974.",
             },
         )
         self.assertTrue(
@@ -371,6 +409,14 @@ class ComplianceRetrievalTests(unittest.TestCase):
 
         self.assertEqual(fused[0], 1)
         self.assertEqual(set(fused), {1, 2, 3})
+
+    def test_multi_query_merge_interleaves_requested_jurisdictions(self):
+        merged = _interleave_rankings(
+            [[10, 11, 12], [20, 21, 22]],
+            4,
+        )
+
+        self.assertEqual(merged, [10, 20, 11, 21])
 
     def test_multi_query_routing_detects_named_jurisdictions(self):
         routes = infer_jurisdictions(

@@ -22,6 +22,10 @@ def load_questions():
 def is_hit(chunk, gold):
     if chunk.get("jurisdiction") != gold["jurisdiction"]:
         return False
+    if "title" in gold and chunk.get("title") != gold["title"]:
+        return False
+    if "file" in gold and chunk.get("file") != gold["file"]:
+        return False
     if chunk.get("section_id") != gold["section_id"]:
         return False
     gold_clause_path = gold.get("clause_path")
@@ -59,6 +63,27 @@ def first_hit_rank(results, golds):
     return max(gold_ranks) if gold_ranks else None
 
 
+def recall_at_k(results, golds, k):
+    if not golds:
+        return 0.0
+    retrieved_gold_count = sum(
+        any(is_hit(chunk, gold) for chunk in results[:k])
+        for gold in golds
+    )
+    return retrieved_gold_count / len(golds)
+
+
+def first_relevant_rank(results, golds):
+    return next(
+        (
+            rank
+            for rank, chunk in enumerate(results, start=1)
+            if any(is_hit(chunk, gold) for gold in golds)
+        ),
+        None,
+    )
+
+
 def check_gold_labels(questions, chunks):
     for question in questions:
         for gold in question["gold"]:
@@ -84,7 +109,13 @@ def main():
     )
 
     stats = {
-        mode: {"rr": [], "hit": [], "by_type": defaultdict(list)}
+        mode: {
+            "rr": [],
+            "hit_at_1": [],
+            "hit_at_5": [],
+            "complete_at_5": [],
+            "by_type": defaultdict(list),
+        }
         for mode in RETRIEVERS
     }
     misses = defaultdict(list)
@@ -97,21 +128,38 @@ def main():
                     FETCH,
                     question.get("filters"),
                     mode,
+                    question.get("jurisdictions"),
                 ),
                 K,
             )
-            rank = first_hit_rank(results, question["gold"])
-            stats[mode]["rr"].append(1 / rank if rank else 0.0)
-            stats[mode]["hit"].append(1 if rank else 0)
-            stats[mode]["by_type"][question["type"]].append(1 if rank else 0)
-            if rank is None:
+            first_rank = first_relevant_rank(results, question["gold"])
+            complete_rank = first_hit_rank(results, question["gold"])
+            recall_at_1 = recall_at_k(results, question["gold"], 1)
+            recall_at_5 = recall_at_k(results, question["gold"], K)
+            stats[mode]["rr"].append(1 / first_rank if first_rank else 0.0)
+            stats[mode]["hit_at_1"].append(recall_at_1)
+            stats[mode]["hit_at_5"].append(recall_at_5)
+            stats[mode]["complete_at_5"].append(
+                1 if complete_rank and complete_rank <= K else 0
+            )
+            stats[mode]["by_type"][question["type"]].append(recall_at_5)
+            if recall_at_5 == 0:
                 misses[mode].append(question["id"])
 
-    print(f"{'retriever':<14}{'Recall@' + str(K):>10}{'MRR':>8}")
+    print(
+        f"{'retriever':<14}{'Recall@1':>10}{'Recall@5':>10}"
+        f"{'MRR':>8}{'Complete@5':>13}"
+    )
     for mode, result in stats.items():
-        recall = sum(result["hit"]) / len(result["hit"])
+        recall_at_1 = sum(result["hit_at_1"]) / len(result["hit_at_1"])
+        recall_at_5 = sum(result["hit_at_5"]) / len(result["hit_at_5"])
         mean_reciprocal_rank = sum(result["rr"]) / len(result["rr"])
-        print(f"{mode:<14}{recall:>10.3f}{mean_reciprocal_rank:>8.3f}")
+        complete_at_5 = sum(result["complete_at_5"]) / len(result["complete_at_5"])
+        print(
+            f"{mode:<14}{recall_at_1:>10.3f}"
+            f"{recall_at_5:>10.3f}{mean_reciprocal_rank:>8.3f}"
+            f"{complete_at_5:>13.3f}"
+        )
 
     print("\nRecall by question type")
     types = sorted({question["type"] for question in answerable})
