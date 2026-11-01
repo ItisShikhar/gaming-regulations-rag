@@ -107,6 +107,11 @@ def _validate_filters(filters):
             allowed = tuple(sorted(set(INDIA_JURISDICTION_TYPES.values())))
         elif key == "country":
             allowed = ("India",)
+        elif key == "title":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("title filters must be non-empty strings.")
+            normalized[key] = value
+            continue
         else:
             raise ValueError(f"Unsupported compliance filter: {key}")
         if value not in allowed:
@@ -345,6 +350,23 @@ def _rrf(rankings, k):
     ]
 
 
+def _interleave_rankings(rankings, k):
+    results = []
+    seen = set()
+    max_depth = max((len(ranking) for ranking in rankings), default=0)
+    for rank in range(max_depth):
+        for ranking in rankings:
+            if rank >= len(ranking):
+                continue
+            chunk_id = ranking[rank]
+            if chunk_id not in seen:
+                seen.add(chunk_id)
+                results.append(chunk_id)
+                if len(results) == k:
+                    return results
+    return results
+
+
 def _chunk_ids_to_chunks(chunk_ids):
     chunks = _load_chunks()
     return [chunks[int(chunk_id)] for chunk_id in chunk_ids]
@@ -441,14 +463,14 @@ def multi_query_search(query, k=5, filters=None, jurisdictions=None):
     for jurisdiction in jurisdictions:
         route_filters = {**selected_filters, "jurisdiction": jurisdiction}
         rankings.append(_hybrid_ids(query, k, route_filters, "pre"))
-    return _chunk_ids_to_chunks(_rrf(rankings, k))
+    return _chunk_ids_to_chunks(_interleave_rankings(rankings, k))
 
 
-def compliance_search(query, k=5, filters=None, mode="pre"):
+def compliance_search(query, k=5, filters=None, mode="pre", jurisdictions=None):
     _validate_limit(k)
     selected_filters = _validate_filters(filters)
     if mode == "multi_query":
-        return multi_query_search(query, k, selected_filters)
+        return multi_query_search(query, k, selected_filters, jurisdictions)
 
     inferred = infer_jurisdictions(query)
     if "jurisdiction" not in selected_filters and len(inferred) == 1:
