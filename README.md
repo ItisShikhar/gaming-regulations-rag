@@ -159,6 +159,31 @@ MRR uses the rank of the first matching source section.
 The evaluation compares dense-only and BM25-only search with unfiltered hybrid search.
 It also compares pre-filtered, post-filtered, and multi-query hybrid search.
 
+### Evaluation limits
+
+The retriever does not use a trained jurisdiction classifier.
+The CLI accepts one `--jurisdiction` filter.
+If you omit it, regular-expression aliases can detect some jurisdiction names and legal codes.
+
+Most India questions provide their jurisdiction in the question data.
+Cross-jurisdiction questions provide explicit route lists to multi-query search.
+The benchmark therefore measures retrieval after routing.
+It does not measure end-to-end jurisdiction detection.
+
+The AI assistant drafted the questions and labels during development.
+The labels were checked against generated chunks.
+This check confirms that each label maps to a chunk.
+It does not independently confirm that the chunk answers the question.
+They were created after source inspection and retrieval testing.
+They are not independent holdout data.
+The evaluation file has no unanswerable questions.
+
+Two known misses are `india-19` and `india-20`.
+The first compares central and Tamil Nadu advertising rules.
+The second compares their payment-transfer rules.
+Multi-query search returned relevant neighboring sections but missed both expected sections in the top five.
+These cases need better section-aware query expansion or ranking.
+
 Run the unit tests:
 
 ```powershell
@@ -210,3 +235,6 @@ It does not provide verified current effect dates or a full amendment history fo
 This project is for learning and research. It is not legal advice and does not determine whether a product complies with a rule.
 
 The corpus and generated indexes stay out of Git because source documents can have separate copyright and reuse terms.
+The public Git tree does not contain the downloaded PDFs, extracted law text, or generated indexes.
+The download scripts save those files locally under ignored `data/` directories.
+Check the source terms before you reuse or redistribute any downloaded document.
