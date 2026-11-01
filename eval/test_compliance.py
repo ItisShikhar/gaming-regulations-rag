@@ -40,7 +40,12 @@ from search import (
     _validate_filters,
     infer_jurisdictions,
 )
-from run_eval import first_hit_rank, first_relevant_rank, recall_at_k
+from run_eval import (
+    filters_for_question,
+    first_hit_rank,
+    first_relevant_rank,
+    recall_at_k,
+)
 
 
 class ComplianceChunkingTests(unittest.TestCase):
@@ -225,6 +230,20 @@ class ComplianceChunkingTests(unittest.TestCase):
 
 
 class ComplianceRetrievalTests(unittest.TestCase):
+    def test_evaluation_filters_infer_one_jurisdiction_only(self):
+        state_question = {
+            "question": "What does UKGC RTS 7A require?",
+            "filters": {},
+        }
+        comparison_question = {
+            "question": "Compare UKGC and GLI standards.",
+            "filters": {},
+            "jurisdictions": ["ukgc", "gli"],
+        }
+
+        self.assertEqual(filters_for_question(state_question), {"jurisdiction": "ukgc"})
+        self.assertEqual(filters_for_question(comparison_question), {})
+
     def test_multi_section_recall_counts_each_expected_source(self):
         golds = [
             {"jurisdiction": "ukgc", "section_id": "RTS 7A"},

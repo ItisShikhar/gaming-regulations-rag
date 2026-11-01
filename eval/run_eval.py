@@ -6,12 +6,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from index import load_chunks
-from search import close_search_client, compliance_search
+from search import (
+    bm25_search,
+    close_search_client,
+    compliance_search,
+    dense_search,
+    hybrid_search,
+    infer_jurisdictions,
+)
 
 QUESTIONS = Path("eval/compliance_questions.jsonl")
 K = 5
 FETCH = 20
-RETRIEVERS = ("pre", "post", "multi_query")
+RETRIEVERS = (
+    "dense_only",
+    "bm25_only",
+    "hybrid_unfiltered",
+    "hybrid_pre",
+    "hybrid_post",
+    "multi_query",
+)
 
 
 def load_questions():
@@ -94,6 +108,37 @@ def check_gold_labels(questions, chunks):
                 )
 
 
+def filters_for_question(question):
+    filters = dict(question.get("filters", {}))
+    if "jurisdiction" not in filters and not question.get("jurisdictions"):
+        inferred = infer_jurisdictions(question["question"])
+        if len(inferred) == 1:
+            filters["jurisdiction"] = inferred[0]
+    return filters
+
+
+def retrieve(question, mode):
+    query = question["question"]
+    filters = filters_for_question(question)
+    if mode == "dense_only":
+        return dense_search(query, FETCH, filters=filters)
+    if mode == "bm25_only":
+        return bm25_search(query, FETCH, filters=filters)
+    if mode == "hybrid_unfiltered":
+        return hybrid_search(query, FETCH)
+    if mode == "hybrid_pre":
+        return compliance_search(query, FETCH, filters, "pre")
+    if mode == "hybrid_post":
+        return compliance_search(query, FETCH, filters, "post")
+    return compliance_search(
+        query,
+        FETCH,
+        question.get("filters"),
+        "multi_query",
+        question.get("jurisdictions"),
+    )
+
+
 def main():
     questions = load_questions()
     if not questions:
@@ -122,16 +167,7 @@ def main():
 
     for question in answerable:
         for mode in RETRIEVERS:
-            results = unique_sections(
-                compliance_search(
-                    question["question"],
-                    FETCH,
-                    question.get("filters"),
-                    mode,
-                    question.get("jurisdictions"),
-                ),
-                K,
-            )
+            results = unique_sections(retrieve(question, mode), K)
             first_rank = first_relevant_rank(results, question["gold"])
             complete_rank = first_hit_rank(results, question["gold"])
             recall_at_1 = recall_at_k(results, question["gold"], 1)
@@ -147,7 +183,7 @@ def main():
                 misses[mode].append(question["id"])
 
     print(
-        f"{'retriever':<14}{'Recall@1':>10}{'Recall@5':>10}"
+        f"{'retriever':<18}{'Recall@1':>10}{'Recall@5':>10}"
         f"{'MRR':>8}{'Complete@5':>13}"
     )
     for mode, result in stats.items():
@@ -156,28 +192,28 @@ def main():
         mean_reciprocal_rank = sum(result["rr"]) / len(result["rr"])
         complete_at_5 = sum(result["complete_at_5"]) / len(result["complete_at_5"])
         print(
-            f"{mode:<14}{recall_at_1:>10.3f}"
+            f"{mode:<18}{recall_at_1:>10.3f}"
             f"{recall_at_5:>10.3f}{mean_reciprocal_rank:>8.3f}"
             f"{complete_at_5:>13.3f}"
         )
 
     print("\nRecall by question type")
     types = sorted({question["type"] for question in answerable})
-    print(f"{'retriever':<14}" + "".join(f"{kind:>14}" for kind in types))
+    print(f"{'retriever':<18}" + "".join(f"{kind:>18}" for kind in types))
     for mode, result in stats.items():
         row = ""
         for kind in types:
             hits = result["by_type"][kind]
             row += (
-                f"{sum(hits) / len(hits):>14.2f}"
+                f"{sum(hits) / len(hits):>18.2f}"
                 if hits
-                else f"{'-':>14}"
+                else f"{'-':>18}"
             )
-        print(f"{mode:<14}{row}")
+        print(f"{mode:<18}{row}")
 
     print("\nMissed question ids")
     for mode in RETRIEVERS:
-        print(f"{mode:<14}{misses[mode]}")
+        print(f"{mode:<18}{misses[mode]}")
 
 
 if __name__ == "__main__":

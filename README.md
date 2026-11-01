@@ -144,14 +144,20 @@ Run the compliance benchmark:
 The evaluation reports Recall@1, Recall@5, Mean Reciprocal Rank, and Complete@5.
 It checks every expected section against the generated chunks before it scores retrieval.
 
-The evaluation file has 48 curated questions.
-It covers exact citations, paraphrases, and cross-jurisdiction comparisons.
-The score is still a benchmark for this corpus, not evidence of production quality.
+The evaluation file has 48 hand-labeled questions.
+It contains exact-citation, paraphrase, and cross-jurisdiction questions.
+It does not contain unanswerable questions.
+The questions and labels were written during development after reading the sources and inspecting retrieval results.
+This is not a held-out test set, so its scores can overstate retrieval quality.
+The retriever does not yet support abstention.
 
 Recall@1 and Recall@5 measure the share of expected source sections found in the top results.
 For a comparison question, each expected jurisdiction is one source section.
 Complete@5 measures the share of questions where the search found every expected section.
 MRR uses the rank of the first matching source section.
+
+The evaluation compares dense-only and BM25-only search with unfiltered hybrid search.
+It also compares pre-filtered, post-filtered, and multi-query hybrid search.
 
 Run the unit tests:
 
